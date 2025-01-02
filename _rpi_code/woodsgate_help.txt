@@ -1,0 +1,29 @@
+ --- Code ---
+- File is automatically started on boot via /etc/rc.local
+- Cron job restarts program 00:00 everyday to ensure no memory issues nor program downtime > 1 day
+- Static IP for device set to 192.168.1.74
+
+
+ --- How to use [From Local Network] ---
+1) Run: pscp -P 22 -pw {PW} admin@192.168.1.74:/home/admin/Documents/5400_data.db 5400_data.db
+2) File is now accessible on local PC
+
+
+ --- How to use [From VNC Viewer/Remote.it] ---
+1) Make a copy of the file '5400_data.db'
+2) Email/Send/USB the copied file to yourself
+3) Delete the copied file.
+
+
+ --- Connections ---
+Top to bottom:
+- 5400 power supply negative lead
+- Brown connector from RPI, GPIO22
+- Green connector from RPI, GPIO10
+- Purple connector from RPI, GPIO9
+- White connector from RPI, GPIO11
+- Empty
+- Empty
+- Black connector from RPI, GND
+- Red connector from RPI, 3.3V
+- 5400 from device negative lead
