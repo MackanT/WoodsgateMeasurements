@@ -509,15 +509,6 @@ entry_ed = __add_entry(frame, text_var, t, label="End Date:  ")
 entry_ed.pack(padx=10, pady=10, side="left")
 entry_ed.bind("<Return>", lambda event=None: update_button.invoke())
 
-
 load_data(DEFAULT_FILE_NAME)
-
-if conn is None:
-    #No dataset found
-    button_load_data = __add_button(frame, "Load Database", cmd=load_data, height=2, width=12, side="left")
-    button_load_data.pack(side="right", padx=10, pady=10)
-
-
-
 
 root.mainloop()
