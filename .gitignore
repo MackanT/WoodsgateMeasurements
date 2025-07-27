@@ -1,4 +1,4 @@
-5400_data.db
+*.db
 csv/*
-pw.txt
-config.yml
+*.yml
+*.yaml
