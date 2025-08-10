@@ -6,12 +6,8 @@ readme = "README.md"
 authors = [
     { name = "Mathias Toftås", email = "github.simplify147@passmail.net" },
 ]
-requires-python = ">=3.9"
-dependencies = [
-    "nicegui>=2.22.2",
-    "pandas>=2.3.1",
-    "plotly>=6.2.0",
-]
+requires-python = ">=3.9.2"
+dependencies = ["nicegui>=2.22.2", "pandas>=2.3.1", "plotly>=6.2.0"]
 
 [project.scripts]
 webgui = "webgui:main"
