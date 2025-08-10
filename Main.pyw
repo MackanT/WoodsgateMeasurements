@@ -125,7 +125,13 @@ if not Path.home().joinpath(".ssh", "id_ed25519").exists():
     )
     exit(1)
 
-cmd = f"scp -P {str(local_port)} -o StrictHostKeyChecking=no {rpi_user}@{ip}:/home/admin/Documents/5400_data.db {db_name}"
+cmd = [
+    "scp",
+    "-P", str(local_port),
+    "-o", "StrictHostKeyChecking=no",
+    f"{rpi_user}@{ip}:/home/admin/Documents/5400_data.db",
+    db_name
+]
 output_lines = []
 
 print("Starting download.... This may take a few minutes depending on connection!")
@@ -135,7 +141,7 @@ with subprocess.Popen(
     stderr=subprocess.STDOUT,
     text=True,
     bufsize=1,
-    universal_newlines=True,
+    universal_newlines=True
 ) as p:
     for line in p.stdout:
         print(line, end="")
