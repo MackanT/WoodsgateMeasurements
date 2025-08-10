@@ -1,6 +1,6 @@
 from webgui.index import run
 
 
-def main() -> None:
+def main():
     print("Starting!")
     run()

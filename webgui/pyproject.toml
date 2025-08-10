@@ -4,12 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "Mathias Toftås", email = "github.simplify147@passmail.net" }
+    { name = "Mathias Toftås", email = "github.simplify147@passmail.net" },
 ]
 requires-python = ">=3.9"
-dependencies = [
-    "nicegui>=2.22.2",
-]
+dependencies = ["nicegui>=2.22.2", "plotly>=6.2.0"]
 
 [project.scripts]
 webgui = "webgui:main"
