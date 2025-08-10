@@ -256,4 +256,4 @@ def index():
 
 
 def run():
-    ui.run(host="0.0.0.0", port=8080, reload=False)
+    ui.run(host="0.0.0.0", port=8080, reload=False, show=False, native=False)
