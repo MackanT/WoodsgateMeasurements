@@ -1,4 +1,4 @@
 dist/
 .venv/
-.vscode/
+data.db
 __pycache__/
