@@ -1,7 +1,9 @@
 {
     "python.analysis.typeCheckingMode": "standard",
     "cSpell.words": [
+        "nicegui",
         "pycache",
-        "venv"
+        "venv",
+        "webgui"
     ]
 }

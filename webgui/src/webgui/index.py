@@ -1,41 +1,63 @@
 from nicegui import ui
 
-
-import sqlite3
 import pandas as pd
 
-ACCENT = "#006400"
+from datetime import datetime, timedelta, date
+from statistics import mean, stdev
+from webgui.repository import WaterDataRepository
+
+ACCENT: str = "#006400"
+
+# Global repository instance - will be initialized in run()
+_repository: WaterDataRepository | None = None
 
 
-def get_data(start, end, granularity):
-    con = sqlite3.connect("data.db")
-    df = pd.read_sql_query(
-        "SELECT time, level, volume FROM data WHERE time BETWEEN ? AND ?",
-        con,
-        params=(start, end),
-    )
-    con.close()
+def _convert_ui_date_to_date(ui_date_value) -> date:
+    """Convert NiceGUI date input value to date object.
 
-    df["time"] = pd.to_datetime(df["time"])
+    Args:
+        ui_date_value: Value from NiceGUI date input (could be string or date object)
 
-    if granularity != "raw":
-        freq_map = {
-            "minute": "T",
-            "hour": "H",
-            "day": "D",
-            "week": "W",
-            "month": "M",
-        }
-        df = df.set_index("time").resample(freq_map[granularity]).mean().reset_index()
+    Returns:
+        date object
+    """
+    if isinstance(ui_date_value, date):
+        return ui_date_value
+    elif isinstance(ui_date_value, datetime):
+        return ui_date_value.date()
+    elif isinstance(ui_date_value, str):
+        return datetime.strptime(ui_date_value, "%Y-%m-%d").date()
+    else:
+        # Fallback - convert to string first
+        return datetime.strptime(str(ui_date_value), "%Y-%m-%d").date()
+
+
+def get_data(
+    start: datetime | date,
+    end: datetime | date,
+    granularity: str,
+    repository: WaterDataRepository,
+) -> pd.DataFrame:
+    df = repository.get_data_by_date_range(start, end)
+
+    # Always apply resampling based on granularity
+    freq_map: dict[str, str] = {
+        "minute": "T",
+        "hour": "H",
+        "day": "D",
+        "week": "W",
+        "month": "M",
+    }
+    df = df.set_index("time").resample(freq_map[granularity]).mean().reset_index()
 
     return df
 
 
-from datetime import datetime, timedelta
-from statistics import mean, stdev
+def create_pump_tab() -> None:
+    if _repository is None:
+        raise RuntimeError("Repository not initialized. Call run() first.")
 
-
-def create_pump_tab():
+    repository = _repository
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-3xl"):
             ui.label("Well Water Level Over Time").classes("text-2xl font-bold mb-4")
@@ -51,12 +73,12 @@ def create_pump_tab():
                 with ui.column().classes("items-center"):
                     ui.label("Start Date")
                     start_input = ui.date(
-                        value=(datetime.now() - timedelta(days=365)).date()
+                        value=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
                     )
 
                 with ui.column().classes("items-center"):
                     ui.label("End Date")
-                    end_input = ui.date(value=datetime.now().date())
+                    end_input = ui.date(value=datetime.now().strftime("%Y-%m-%d"))
 
             # Global stats and granularity selector side-by-side below date pickers
             with stats_container:
@@ -71,22 +93,44 @@ def create_pump_tab():
                     with ui.column().classes("items-end"):
                         ui.label("Data Granularity")
                         granularity_input = ui.select(
-                            ["raw", "minute", "hour", "day", "week", "month"],
+                            ["minute", "hour", "day", "week", "month"],
                             value="day",
                         ).classes("w-48")
+                        ui.label("Note: 'minute' auto-limited to 7 days").classes(
+                            "text-xs text-gray-500 mt-1"
+                        )
 
-            def update_graph():
-                start = str(start_input.value)
-                end = str(end_input.value)
+            def update_graph() -> None:
+                # Convert string values from NiceGUI to datetime objects immediately
+                start_date: date = _convert_ui_date_to_date(start_input.value)
+                end_date: date = _convert_ui_date_to_date(end_input.value)
                 granularity = granularity_input.value
 
-                con = sqlite3.connect("data.db")
-                df = pd.read_sql_query(
-                    "SELECT time, level, volume FROM data WHERE time BETWEEN ? AND ?",
-                    con,
-                    params=(start, end),
-                )
-                con.close()
+                # Check time range limits for performance-sensitive granularities
+                date_range = (end_date - start_date).days
+                max_days_for_granularity = {"minute": 7}
+
+                if granularity in max_days_for_granularity:
+                    max_allowed_days = max_days_for_granularity[granularity]
+                    if date_range > max_allowed_days:
+                        # Automatically adjust the date range to the last week
+                        new_start_date = end_date - timedelta(days=max_allowed_days)
+
+                        # Update the date pickers
+                        start_input.set_value(new_start_date.strftime("%Y-%m-%d"))
+
+                        # Update our local variables
+                        start_date = new_start_date
+
+                        # Notify the user about the automatic adjustment
+                        ui.notify(
+                            f"Date range automatically limited to {max_allowed_days} days for '{granularity}' granularity "
+                            f"(was {date_range} days). Start date adjusted to {new_start_date.strftime('%Y-%m-%d')}.",
+                            type="warning",
+                            timeout=5000,
+                        )
+
+                df = repository.get_data_by_date_range(start_date, end_date)
 
                 if df.empty:
                     plot_container.clear()
@@ -106,82 +150,62 @@ def create_pump_tab():
 
                 fig = go.Figure()
 
-                if granularity != "raw":
-                    freq_map = {
-                        "minute": "T",
-                        "hour": "H",
-                        "day": "D",
-                        "week": "W",
-                        "month": "M",
-                    }
-                    df.set_index("time", inplace=True)
-                    groups = df.groupby(pd.Grouper(freq=freq_map[granularity]))
+                # Always apply resampling based on granularity
+                freq_map: dict[str, str] = {
+                    "minute": "min",
+                    "hour": "h",
+                    "day": "d",
+                    "week": "W",
+                    "month": "ME",
+                }
+                df.set_index("time", inplace=True)
+                groups = df.groupby(pd.Grouper(freq=freq_map[granularity]))
 
-                    data = []
-                    for time_val, group in groups:
-                        if group.empty:
-                            continue
-                        l_vals = group["level"].dropna().tolist()
-                        v_vals = group["volume"].dropna().tolist()
-                        if not l_vals or not v_vals:
-                            continue
-                        n = min(len(l_vals), len(v_vals))
-                        l_min, l_max = min(l_vals), max(l_vals)
-                        v_min, v_max = min(v_vals), max(v_vals)
-                        l_mean_val = mean(l_vals)
-                        v_mean_val = mean(v_vals)
-                        l_std = stdev(l_vals) if len(l_vals) > 1 else 0
-                        v_std = stdev(v_vals) if len(v_vals) > 1 else 0
+                data: list[tuple[datetime, float, str]] = []
+                for time_val, group in groups:
+                    if group.empty:
+                        continue
+                    l_vals: list[float] = group["level"].dropna().tolist()
+                    v_vals: list[float] = group["volume"].dropna().tolist()
+                    if not l_vals or not v_vals:
+                        continue
+                    n = min(len(l_vals), len(v_vals))
+                    l_min, l_max = min(l_vals), max(l_vals)
+                    v_min, v_max = min(v_vals), max(v_vals)
+                    l_mean_val = mean(l_vals)
+                    v_mean_val = mean(v_vals)
+                    l_std = stdev(l_vals) if len(l_vals) > 1 else 0
+                    v_std = stdev(v_vals) if len(v_vals) > 1 else 0
 
-                        tooltip = (
-                            f"Time: {time_val.strftime('%Y-%m-%d %H:%M')}<br>"
-                            f"Level: [{l_min:.2f}↓, {l_max:.2f}↑] ({l_mean_val:.2f} ± {l_std:.2f})<br>"
-                            f"Volume: [{v_min:.2f}↓, {v_max:.2f}↑] ({v_mean_val:.2f} ± {v_std:.2f})<br>"
-                            f"Number of data points: {n}"
-                        )
-
-                        data.append((time_val.to_pydatetime(), l_mean_val, tooltip))
-
-                    if not data:
-                        plot_container.clear()
-                        with plot_container:
-                            ui.label("No data after aggregation.").classes(
-                                "text-red-500"
-                            )
-                        global_stats_level.set_text("")
-                        global_stats_volume.set_text("")
-                        global_stats_count.set_text("")
-                        return
-
-                    times, levels, tooltips = zip(*data)
-                    fig.add_trace(
-                        go.Scatter(
-                            x=times,
-                            y=levels,
-                            mode="lines+markers",
-                            hoverinfo="text",
-                            text=tooltips,
-                            name="Water Level (Aggregated)",
-                        )
+                    tooltip: str = (
+                        f"Time: {time_val.strftime('%Y-%m-%d %H:%M')}<br>"
+                        f"Level: [{l_min:.2f}↓, {l_max:.2f}↑] ({l_mean_val:.2f} ± {l_std:.2f})<br>"
+                        f"Volume: [{v_min:.2f}↓, {v_max:.2f}↑] ({v_mean_val:.2f} ± {v_std:.2f})<br>"
+                        f"Number of data points: {n}"
                     )
-                else:
-                    df.dropna(inplace=True)
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df["time"],
-                            y=df["level"],
-                            mode="lines+markers",
-                            hoverinfo="text",
-                            text=[
-                                f"Time: {t.strftime('%Y-%m-%d %H:%M')}<br>Level: {l:.2f}<br>Volume: {v:.2f}"
-                                for t, l, v in zip(
-                                    df["time"], df["level"], df["volume"]
-                                )
-                            ],
-                            name="Water Level",
-                            marker=dict(color=ACCENT),
-                        )
+
+                    data.append((time_val.to_pydatetime(), l_mean_val, tooltip))
+
+                if not data:
+                    plot_container.clear()
+                    with plot_container:
+                        ui.label("No data after aggregation.").classes("text-red-500")
+                    global_stats_level.set_text("")
+                    global_stats_volume.set_text("")
+                    global_stats_count.set_text("")
+                    return
+
+                times, levels, tooltips = zip(*data)
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=levels,
+                        mode="lines+markers",
+                        hoverinfo="text",
+                        text=tooltips,
+                        name="Water Level (Aggregated)",
                     )
+                )
 
                 fig.update_layout(
                     xaxis_title="Time",
@@ -197,17 +221,21 @@ def create_pump_tab():
                     ui.plotly(fig).classes("w-full")
 
                 # Update global stats below
-                level_vals = raw_df["level"].dropna().tolist()
-                volume_vals = raw_df["volume"].dropna().tolist()
+                level_vals: list[float] = raw_df["level"].dropna().tolist()
+                volume_vals: list[float] = raw_df["volume"].dropna().tolist()
 
                 if level_vals and volume_vals:
-                    n = min(len(level_vals), len(volume_vals))
+                    n: int = min(len(level_vals), len(volume_vals))
+                    l_min: float
+                    l_max: float
                     l_min, l_max = min(level_vals), max(level_vals)
+                    v_min: float
+                    v_max: float
                     v_min, v_max = min(volume_vals), max(volume_vals)
-                    l_mean_val = mean(level_vals)
-                    v_mean_val = mean(volume_vals)
-                    l_std = stdev(level_vals) if len(level_vals) > 1 else 0
-                    v_std = stdev(volume_vals) if len(volume_vals) > 1 else 0
+                    l_mean_val: float = mean(level_vals)
+                    v_mean_val: float = mean(volume_vals)
+                    l_std: float = stdev(level_vals) if len(level_vals) > 1 else 0
+                    v_std: float = stdev(volume_vals) if len(volume_vals) > 1 else 0
 
                     global_stats_level.set_text(
                         f"Level: [{l_min:.2f}↓, {l_max:.2f}↑] ({l_mean_val:.2f} ± {l_std:.2f})"
@@ -222,11 +250,14 @@ def create_pump_tab():
                     global_stats_count.set_text("")
 
             update_button.on("click", update_graph)
+            granularity_input.on(
+                "change", update_graph
+            )  # Auto-update when granularity changes
             update_graph()
 
 
 @ui.page("/")
-def index():
+def index() -> None:
     ui.colors(primary=ACCENT)
 
     with ui.tabs().classes("w-full justify-center") as tabs:
@@ -255,5 +286,31 @@ def index():
     """)
 
 
-def run():
-    ui.run(host="0.0.0.0", port=8080, reload=False, show=False, native=False)
+def run(
+    db_path: str = "data.db",
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    reload: bool = False,
+) -> None:
+    """Run the web application.
+
+    Args:
+        db_path: Path to the SQLite database file (default: "data.db")
+        host: Host to bind the server to (default: "0.0.0.0")
+        port: Port to bind the server to (default: 8080)
+        reload: Enable hot reload for development (default: False)
+    """
+    global _repository
+    _repository = WaterDataRepository(db_path)
+
+    ui.run(
+        host=host,
+        port=port,
+        title="WoodsGate Water Measurements",
+        dark=False,
+        native=False,
+        show=False,
+        reload=reload,
+        uvicorn_reload_includes="*.py",
+        uvicorn_reload_excludes=".*, .pyc, .pyo, .sw.*, ~*",
+    )
