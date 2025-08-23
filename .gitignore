@@ -1,5 +1,5 @@
 *.db
 csv/*
-*.yml
-*.yaml
+config.yml
+config.yaml
 *.pbix
