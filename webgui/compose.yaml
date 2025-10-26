@@ -5,7 +5,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ${PWD}/data.db:/app/data.db:ro
+      - /home/admin/repos/WoodsgateMeasurements/data.db:/app/data.db:ro
     command: "--host 0.0.0.0 --port 8080 --db-path /app/data.db"
     healthcheck:
       test: [ "CMD", "bash", "-c", "echo", ">", "/dev/tcp/localhost/8080", "||", "exit", "1" ]
@@ -13,4 +13,4 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
-    restart: unless-stopped
+    restart: always

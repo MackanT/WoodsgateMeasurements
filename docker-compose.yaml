@@ -1,0 +1,72 @@
+services:
+  # Data Collector Service
+  woodsgate-collector:
+    build: 
+      context: ./webgui/woodsgate_collector
+      dockerfile: Dockerfile
+    container_name: woodsgate-data-collector
+    restart: unless-stopped
+    
+    # GPIO and I2C access for Raspberry Pi
+    privileged: true
+    devices:
+      - "/dev/i2c-1:/dev/i2c-1"
+      - "/dev/gpiomem:/dev/gpiomem"
+    
+    # Volume for shared database
+    volumes:
+      - .:/shared_data
+    
+    # Environment variables
+    environment:
+      - PYTHONUNBUFFERED=1
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "uv", "run", "python", "-c", "import sqlite3; conn = sqlite3.connect('/shared_data/data.db'); cursor = conn.execute('SELECT COUNT(*) FROM data'); print('Health check passed')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Web GUI Service  
+  webgui:
+    build: 
+      context: ./webgui
+      dockerfile: Dockerfile
+    container_name: woodsgate-webgui
+    restart: unless-stopped
+    
+    ports:
+      - "8080:8080"
+    
+    # Read-only access to shared database
+    volumes:
+      - ./data.db:/app/data.db:ro
+    
+    command: "--host 0.0.0.0 --port 8080 --db-path /app/data.db"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    
+    # Depends on collector to create database first
+    depends_on:
+      woodsgate-collector:
+        condition: service_healthy
+
+# Create a shared network (optional but good practice)
+networks:
+  default:
+    name: woodsgate-network
