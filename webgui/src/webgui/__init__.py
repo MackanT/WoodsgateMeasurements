@@ -26,6 +26,13 @@ def parse_args() -> argparse.Namespace:
         default="data.db",
         help="Path to the SQLite database file",
     )
+    
+    parser.add_argument(
+        "--pwd-path",
+        type=str,
+        default="password.txt",
+        help="Path to the PostgreSQL password file",
+    )
 
     return parser.parse_args()
 
@@ -37,7 +44,11 @@ def main(args: argparse.Namespace | None = None, reload: bool = False) -> None:
 
     db_path = Path(args.db_path)
     if not db_path.exists():
-        print(f"Error: Database file '{db_path}' not found!", file=sys.stderr)
+        print(f"⚠️  Warning: Database file '{db_path}' not found!", file=sys.stderr)
+    
+    pwd_path = Path(args.pwd_path)
+    if not pwd_path.exists():
+        print(f"❌ Error: Password file '{pwd_path}' not found!", file=sys.stderr)
         sys.exit(1)
 
     if reload:
@@ -45,13 +56,15 @@ def main(args: argparse.Namespace | None = None, reload: bool = False) -> None:
     else:
         print("🚀 Running in production mode")
 
-    print(f"🗄️  Database: {db_path.absolute()}")
+    print(f"🗄️  SQLite Database: {db_path.absolute()}")
+    print(f"🔐 PostgreSQL Password: {pwd_path.absolute()}")
     print(f"🌐 Server: http://{args.host}:{args.port}")
     print("Starting server...")
 
     try:
         run(
             db_path=str(db_path.absolute()),
+            pwd_path=str(pwd_path.absolute()),
             host=args.host,
             port=args.port,
             reload=reload,
