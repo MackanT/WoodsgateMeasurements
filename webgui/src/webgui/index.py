@@ -179,8 +179,10 @@ def create_pump_tab() -> None:
 
                     tooltip: str = (
                         f"Time: {time_val.strftime('%Y-%m-%d %H:%M')}<br>"
-                        f"Level: [{l_min:.2f}↓, {l_max:.2f}↑] ({l_mean_val:.2f} ± {l_std:.2f})<br>"
-                        f"Volume: [{v_min:.2f}↓, {v_max:.2f}↑] ({v_mean_val:.2f} ± {v_std:.2f})<br>"
+                        f"Level: {l_mean_val:.2f} ± {l_std:.2f}<br>"
+                        f"Level Range: [{l_min:.2f}↓, {l_max:.2f}↑]<br>"
+                        f"Volume: {v_mean_val:.2f} ± {v_std:.2f}<br>"
+                        f"Volume Range: [{v_min:.2f}↓, {v_max:.2f}↑]<br>"
                         f"Number of data points: {n}"
                     )
 
@@ -238,10 +240,10 @@ def create_pump_tab() -> None:
                     v_std: float = stdev(volume_vals) if len(volume_vals) > 1 else 0
 
                     global_stats_level.set_text(
-                        f"Level: [{l_min:.2f}↓, {l_max:.2f}↑] ({l_mean_val:.2f} ± {l_std:.2f})"
+                        f"Level: {l_mean_val:.2f} ± {l_std:.2f} \t[{l_min:.2f}↓, {l_max:.2f}↑]"
                     )
                     global_stats_volume.set_text(
-                        f"Volume: [{v_min:.2f}↓, {v_max:.2f}↑] ({v_mean_val:.2f} ± {v_std:.2f})"
+                        f"Volume: {v_mean_val:.2f} ± {v_std:.2f} \t[{v_min:.2f}↓, {v_max:.2f}↑]"
                     )
                     global_stats_count.set_text(f"Number of data points: {n}")
                 else:
@@ -255,21 +257,25 @@ def create_pump_tab() -> None:
             )  # Auto-update when granularity changes
             update_graph()
 
+def create_vvp_tab() -> None:
+    with ui.column().classes("w-full items-center"):
+        with ui.card().classes("w-full max-w-3xl"):
+            ui.label("Värmepump Data - Coming Soon!").classes("text-2xl font-bold mb-4")
 
 @ui.page("/")
 def index() -> None:
     ui.colors(primary=ACCENT)
 
     with ui.tabs().classes("w-full justify-center") as tabs:
-        pump_tab = ui.tab("Pump")
-        temp_tab = ui.tab("Temp")
+        pump_tab = ui.tab("Waterlevel")
+        temp_tab = ui.tab("Nibe 360P")
 
     with ui.tab_panels(tabs, value=pump_tab).classes("w-full"):
         with ui.tab_panel(pump_tab):
             create_pump_tab()
 
         with ui.tab_panel(temp_tab):
-            ui.label("Temperature Data Coming Soon...").classes("text-lg text-gray-500")
+            create_vvp_tab()
 
     ui.add_head_html("""
     <style>
