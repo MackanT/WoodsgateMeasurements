@@ -2,3 +2,4 @@ dist/
 .venv/
 data.db
 __pycache__/
+password.txt

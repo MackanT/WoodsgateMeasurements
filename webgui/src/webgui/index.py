@@ -2,9 +2,11 @@ from nicegui import ui
 
 import pandas as pd
 
+import plotly.express as px
 from datetime import datetime, timedelta, date
 from statistics import mean, stdev
 from webgui.repository import WaterDataRepository
+from webgui.postgress_db import SensorDataRepository
 
 ACCENT: str = "#006400"
 
@@ -258,9 +260,295 @@ def create_pump_tab() -> None:
             update_graph()
 
 def create_vvp_tab() -> None:
+    if _new_repository is None:
+        raise RuntimeError("Postgress Repository not initialized. Call run() first.")
+
+    repository = _new_repository
+    
+    # Initial date range
+    initial_start = datetime.now() - timedelta(days=7)
+    initial_end = datetime.now()
+    
+    # Load initial data from all tables with date range
+    t_data = repository.get_data_by_date_range("temperatures", initial_start, initial_end)
+    alarms_data = repository.get_data_by_date_range("alarms", initial_start, initial_end)
+    power_data = repository.get_data_by_date_range("power", initial_start, initial_end)
+    pump_data = repository.get_data_by_date_range("pump", initial_start, initial_end)
+    
+    t_data_labels = t_data['name'].unique().tolist() if not t_data.empty else []
+    alarms_labels = alarms_data['name'].unique().tolist() if not alarms_data.empty else []
+    power_labels = power_data['name'].unique().tolist() if not power_data.empty else []
+    pump_labels = pump_data['name'].unique().tolist() if not pump_data.empty else []
+    
+    # Create a consistent color map for each data series
+    colors = px.colors.qualitative.Plotly + px.colors.qualitative.Set2
+    color_map = {label: colors[i % len(colors)] for i, label in enumerate(t_data_labels)}
+    
     with ui.column().classes("w-full items-center"):
-        with ui.card().classes("w-full max-w-3xl"):
-            ui.label("Värmepump Data - Coming Soon!").classes("text-2xl font-bold mb-4")
+        with ui.card().classes("w-full max-w-8xl"):
+            ui.label("Nibe 360P Data").classes("text-2xl font-bold mb-4")
+            
+            # Compact date range filter with icon and menu
+            with ui.row().classes("w-full justify-start items-center gap-2 mb-4"):
+                ui.label("Date Range:").classes("text-sm font-semibold")
+                
+                # Display current date range
+                date_display = ui.label(f"{initial_start.strftime('%Y-%m-%d')} to {initial_end.strftime('%Y-%m-%d')}").classes("text-sm")
+                
+                # Icon button that opens menu with date picker
+                with ui.button(icon='calendar_month').props('flat dense'):
+                    with ui.menu() as date_menu:
+                        with ui.card().classes('p-4'):
+                            ui.label('Select Date Range').classes('text-lg font-bold mb-2')
+                            date_range = ui.date({
+                                'from': initial_start.strftime("%Y-%m-%d"),
+                                'to': initial_end.strftime("%Y-%m-%d")
+                            }).props('range')
+                            
+                            def apply_dates():
+                                date_menu.close()
+                                reload_all_data()
+                            
+                            ui.button('Apply', on_click=apply_dates).classes('mt-2')
+            
+            temp_checkboxes = {}
+            alarms_checkboxes = {}
+            power_checkboxes = {}
+            pump_checkboxes = {}
+            right_panel = None
+            
+            def reload_all_data():
+                """Reload all data from repository with new date range"""
+                nonlocal t_data, alarms_data, power_data, pump_data
+                nonlocal t_data_labels, alarms_labels, power_labels, pump_labels
+                
+                range_value = date_range.value
+                if not range_value or 'from' not in range_value or 'to' not in range_value:
+                    return
+                
+                start = _convert_ui_date_to_date(range_value['from'])
+                end = _convert_ui_date_to_date(range_value['to'])
+                
+                # Update display
+                date_display.set_text(f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}")
+                
+                # Reload data from repository
+                t_data = repository.get_data_by_date_range("temperatures", start, end)
+                alarms_data = repository.get_data_by_date_range("alarms", start, end)
+                power_data = repository.get_data_by_date_range("power", start, end)
+                pump_data = repository.get_data_by_date_range("pump", start, end)
+                
+                # Update labels
+                t_data_labels = t_data['name'].unique().tolist() if not t_data.empty else []
+                alarms_labels = alarms_data['name'].unique().tolist() if not alarms_data.empty else []
+                power_labels = power_data['name'].unique().tolist() if not power_data.empty else []
+                pump_labels = pump_data['name'].unique().tolist() if not pump_data.empty else []
+                
+                # Refresh current view
+                update_temps_plot()
+            
+            def update_temps_plot():
+                import plotly.graph_objs as go
+                
+                fig = go.Figure()
+                
+                # Data is already filtered by date range from repository
+                for label in t_data_labels:
+                    if label in temp_checkboxes and temp_checkboxes[label].value:
+                        sensor_data = t_data[t_data['name'] == label]
+                        
+                        # Create custom hover text with value on its own row
+                        hover_text = [
+                            f"{label}<br>Time: {row['timestamp']}<br>Value: {row['value']:.2f}"
+                            for _, row in sensor_data.iterrows()
+                        ]
+                        
+                        fig.add_trace(go.Scatter(
+                            x=sensor_data['timestamp'],
+                            y=sensor_data['value'],
+                            mode='lines+markers',
+                            name=label,
+                            line=dict(color=color_map.get(label, 'blue')),
+                            marker=dict(color=color_map.get(label, 'blue')),
+                            hovertext=hover_text,
+                            hoverinfo='text'
+                        ))
+                
+                fig.update_layout(
+                    xaxis_title="Time",
+                    yaxis_title="Value",
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    height=350,
+                    showlegend=True
+                )
+                
+                right_panel.clear()
+                with right_panel:
+                    ui.plotly(fig).classes("w-full h-full")
+            
+            def show_filtered_table(data, checkboxes_dict, labels_list, title):
+                # Data is already filtered by date range from repository
+                # Filter data based on selected checkboxes
+                selected_labels = [label for label in labels_list if label in checkboxes_dict and checkboxes_dict[label].value]
+                
+                if selected_labels:
+                    filtered_data = data[data['name'].isin(selected_labels)].copy()
+                    # Sort by name (ascending), then timestamp (descending)
+                    if 'name' in filtered_data.columns and 'timestamp' in filtered_data.columns:
+                        filtered_data = filtered_data.sort_values(by=['name', 'timestamp'], ascending=[True, False])
+                else:
+                    filtered_data = pd.DataFrame()  # Empty if nothing selected
+                
+                right_panel.clear()
+                with right_panel:
+                    if not filtered_data.empty:
+                        with ui.scroll_area().classes('w-full h-full'):
+                            # Convert dataframe copy and handle timestamps
+                            data_copy = filtered_data.copy()
+                            
+                            # Convert all datetime/timestamp columns to strings
+                            for col in data_copy.columns:
+                                if pd.api.types.is_datetime64_any_dtype(data_copy[col]):
+                                    data_copy[col] = data_copy[col].astype(str)
+                            
+                            # Hide id and register columns
+                            columns_to_hide = ['id', 'register']
+                            visible_columns = [col for col in data_copy.columns if col not in columns_to_hide]
+                            
+                            # Reorder columns: name, value, timestamp
+                            column_order = ['name', 'value', 'timestamp']
+                            ordered_columns = [col for col in column_order if col in visible_columns]
+                            # Add any remaining columns that weren't in the specified order
+                            ordered_columns.extend([col for col in visible_columns if col not in column_order])
+                            
+                            # Create a table
+                            columns = [{'name': col, 'label': col.title(), 'field': col} for col in ordered_columns]
+                            rows = data_copy[ordered_columns].to_dict('records')
+                            
+                            # Determine row key
+                            if 'timestamp' in ordered_columns:
+                                row_key = 'timestamp'
+                            elif 'name' in ordered_columns:
+                                row_key = 'name'
+                            else:
+                                # Add index as row key
+                                for i, row in enumerate(rows):
+                                    row['_index'] = i
+                                columns.insert(0, {'name': '_index', 'label': 'Index', 'field': '_index'})
+                                row_key = '_index'
+                            
+                            # Labels above the table
+                            ui.label(title).classes('text-xl font-bold mb-2')
+                            ui.label(f'Showing {len(filtered_data)} records ({len(selected_labels)} series selected)').classes('text-sm text-gray-600 mb-2')
+                            
+                            ui.table(
+                                columns=columns,
+                                rows=rows,
+                                row_key=row_key
+                            ).classes('w-full')
+                    else:
+                        ui.label(f'No data to display. Select items from the left panel.').classes('text-gray-500')
+            
+            with ui.splitter(value=20).classes('w-full h-96') as splitter:
+                # Left side: grouped controls
+                with splitter.before:
+                    with ui.scroll_area().classes('w-full h-full'):
+                        # Temperatures group - with checkboxes
+                        temp_expansion = ui.expansion('Temperatures', icon='thermostat').classes('w-full')
+                        with temp_expansion:
+                            if t_data_labels:
+                                def toggle_all_temps(value):
+                                    for cb in temp_checkboxes.values():
+                                        cb.set_value(value)
+                                    update_temps_plot()
+                                
+                                with ui.row().classes('w-full gap-2 mb-2'):
+                                    ui.button('Select All', on_click=lambda: toggle_all_temps(True)).props('dense flat size=sm')
+                                    ui.button('Unselect All', on_click=lambda: toggle_all_temps(False)).props('dense flat size=sm')
+                                
+                                for label in t_data_labels:
+                                    checkbox = ui.checkbox(label, value=True)
+                                    checkbox.on_value_change(update_temps_plot)
+                                    temp_checkboxes[label] = checkbox
+                            else:
+                                ui.label('No temperature data available').classes('text-sm text-gray-500')
+                        
+                        temp_expansion.on('click', lambda: update_temps_plot())
+                        
+                        # Alarms group - with checkboxes
+                        alarms_expansion = ui.expansion('Alarms', icon='warning').classes('w-full')
+                        with alarms_expansion:
+                            if alarms_labels:
+                                def toggle_all_alarms(value):
+                                    for cb in alarms_checkboxes.values():
+                                        cb.set_value(value)
+                                    show_filtered_table(alarms_data, alarms_checkboxes, alarms_labels, 'Alarms')
+                                
+                                with ui.row().classes('w-full gap-2 mb-2'):
+                                    ui.button('Select All', on_click=lambda: toggle_all_alarms(True)).props('dense flat size=sm')
+                                    ui.button('Unselect All', on_click=lambda: toggle_all_alarms(False)).props('dense flat size=sm')
+                                
+                                for label in alarms_labels:
+                                    checkbox = ui.checkbox(label, value=True)
+                                    checkbox.on_value_change(lambda: show_filtered_table(alarms_data, alarms_checkboxes, alarms_labels, 'Alarms'))
+                                    alarms_checkboxes[label] = checkbox
+                            else:
+                                ui.label('No alarm data available').classes('text-sm text-gray-500')
+                        
+                        alarms_expansion.on('click', lambda: show_filtered_table(alarms_data, alarms_checkboxes, alarms_labels, 'Alarms'))
+                        
+                        # Power group - with checkboxes
+                        power_expansion = ui.expansion('Power', icon='power').classes('w-full')
+                        with power_expansion:
+                            if power_labels:
+                                def toggle_all_power(value):
+                                    for cb in power_checkboxes.values():
+                                        cb.set_value(value)
+                                    show_filtered_table(power_data, power_checkboxes, power_labels, 'Power Data')
+                                
+                                with ui.row().classes('w-full gap-2 mb-2'):
+                                    ui.button('Select All', on_click=lambda: toggle_all_power(True)).props('dense flat size=sm')
+                                    ui.button('Unselect All', on_click=lambda: toggle_all_power(False)).props('dense flat size=sm')
+                                
+                                for label in power_labels:
+                                    checkbox = ui.checkbox(label, value=True)
+                                    checkbox.on_value_change(lambda: show_filtered_table(power_data, power_checkboxes, power_labels, 'Power Data'))
+                                    power_checkboxes[label] = checkbox
+                            else:
+                                ui.label('No power data available').classes('text-sm text-gray-500')
+                        
+                        power_expansion.on('click', lambda: show_filtered_table(power_data, power_checkboxes, power_labels, 'Power Data'))
+                        
+                        # Pump group - with checkboxes
+                        pump_expansion = ui.expansion('Pump', icon='hvac').classes('w-full')
+                        with pump_expansion:
+                            if pump_labels:
+                                def toggle_all_pump(value):
+                                    for cb in pump_checkboxes.values():
+                                        cb.set_value(value)
+                                    show_filtered_table(pump_data, pump_checkboxes, pump_labels, 'Pump Data')
+                                
+                                with ui.row().classes('w-full gap-2 mb-2'):
+                                    ui.button('Select All', on_click=lambda: toggle_all_pump(True)).props('dense flat size=sm')
+                                    ui.button('Unselect All', on_click=lambda: toggle_all_pump(False)).props('dense flat size=sm')
+                                
+                                for label in pump_labels:
+                                    checkbox = ui.checkbox(label, value=True)
+                                    checkbox.on_value_change(lambda: show_filtered_table(pump_data, pump_checkboxes, pump_labels, 'Pump Data'))
+                                    pump_checkboxes[label] = checkbox
+                            else:
+                                ui.label('No pump data available').classes('text-sm text-gray-500')
+                        
+                        pump_expansion.on('click', lambda: show_filtered_table(pump_data, pump_checkboxes, pump_labels, 'Pump Data'))
+                
+                # Right side: dynamic content area
+                with splitter.after:
+                    right_panel = ui.element("div").classes("w-full h-full")
+            
+            # Initial plot
+            if t_data_labels:
+                update_temps_plot()
+    
 
 @ui.page("/")
 def index() -> None:
@@ -294,6 +582,7 @@ def index() -> None:
 
 def run(
     db_path: str = "data.db",
+    pwd_path: str = "password.txt",
     host: str = "0.0.0.0",
     port: int = 8080,
     reload: bool = False,
@@ -306,8 +595,9 @@ def run(
         port: Port to bind the server to (default: 8080)
         reload: Enable hot reload for development (default: False)
     """
-    global _repository
+    global _repository, _new_repository
     _repository = WaterDataRepository(db_path)
+    _new_repository = SensorDataRepository(pwd_path)
 
     ui.run(
         host=host,

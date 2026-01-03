@@ -7,7 +7,12 @@ authors = [
     { name = "Mathias Toftås", email = "github.simplify147@passmail.net" },
 ]
 requires-python = ">=3.11.2"
-dependencies = ["nicegui>=2.22.2", "pandas>=2.3.1", "plotly>=6.2.0"]
+dependencies = [
+    "nicegui>=2.22.2",
+    "pandas>=2.3.1",
+    "plotly>=6.2.0",
+    "psycopg2-binary>=2.9.11",
+]
 
 [project.scripts]
 webgui = "webgui:main"
