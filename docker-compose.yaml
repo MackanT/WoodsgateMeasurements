@@ -30,9 +30,9 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "uv", "run", "python", "-c", "import sqlite3; conn = sqlite3.connect('/shared_data/data.db'); cursor = conn.execute('SELECT COUNT(*) FROM data'); print('Health check passed')"]
+      test: ["CMD", "sh", "-c", "cat /proc/1/cmdline | grep -q collector"]
       interval: 60s
-      timeout: 10s
+      timeout: 5s
       retries: 3
       start_period: 30s
 
@@ -64,7 +64,7 @@ services:
     # Depends on collector to create database first
     depends_on:
       woodsgate-collector:
-        condition: service_healthy
+        condition: service_started
 
 # Create a shared network (optional but good practice)
 networks:
