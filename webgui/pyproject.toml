@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11.2"
 dependencies = [
+    "adafruit-blinka>=8.69.0",
     "nicegui>=2.22.2",
     "pandas>=2.3.1",
     "plotly>=6.2.0",
