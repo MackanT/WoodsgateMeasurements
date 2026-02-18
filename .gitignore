@@ -3,3 +3,4 @@ csv/*
 config.yml
 config.yaml
 *.pbix
+venv/
