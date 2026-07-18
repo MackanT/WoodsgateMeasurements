@@ -10,8 +10,53 @@ from webgui.postgress_db import SensorDataRepository
 
 ACCENT: str = "#006400"
 
-# Global repository instance - will be initialized in run()
+# Must match `tank_height` in woodsgate_collector/data_collector.py - used only
+# to show a "% full" hint on the current-level card.
+TANK_HEIGHT_M: float = 3.11
+# Level below which the status card flags a low-water warning. Tune to taste.
+LOW_LEVEL_WARNING_M: float = 0.5
+
+# Global repository instances - will be initialized in run()
 _repository: WaterDataRepository | None = None
+_new_repository: SensorDataRepository | None = None
+
+
+def _format_stat_html(label: str, mean_val: float, std_val: float, min_val: float, max_val: float) -> str:
+    """Build a compact stats line with the headline number made to stand out.
+
+    Renders as: "Label:  <big bold value>  ± std [min, max]" with the mean
+    value emphasized (bold, larger, accent-colored) so it can be read at a
+    glance, and the spread (± std / range) shown smaller and muted since it's
+    secondary detail.
+    """
+    return (
+        f'<span class="text-sm text-gray-500">{label}:</span> '
+        f'<span class="text-2xl font-bold" style="color:{ACCENT}">{mean_val:.2f}</span> '
+        f'<span class="text-xs text-gray-500">± {std_val:.2f} &nbsp;[{min_val:.2f}, {max_val:.2f}]</span>'
+    )
+
+
+def _format_current_value_html(label: str, value: float, color: str, extra: str = "") -> str:
+    """Build a large, bold "current value" line for a status card."""
+    extra_html = f' <span class="text-sm text-gray-500">{extra}</span>' if extra else ""
+    return (
+        f'<div class="text-sm text-gray-500">{label}</div>'
+        f'<div class="text-3xl font-bold" style="color:{color}">{value:.2f}</div>'
+        f'{extra_html}'
+    )
+
+
+def _time_ago_str(when: datetime) -> str:
+    """Render a datetime as a short "X ago" string."""
+    delta = datetime.now() - when
+    seconds = delta.total_seconds()
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
 
 
 def _convert_ui_date_to_date(ui_date_value) -> date:
@@ -34,41 +79,105 @@ def _convert_ui_date_to_date(ui_date_value) -> date:
         return datetime.strptime(str(ui_date_value), "%Y-%m-%d").date()
 
 
-def get_data(
-    start: datetime | date,
-    end: datetime | date,
-    granularity: str,
-    repository: WaterDataRepository,
-) -> pd.DataFrame:
-    df = repository.get_data_by_date_range(start, end)
-
-    # Always apply resampling based on granularity
-    freq_map: dict[str, str] = {
-        "minute": "T",
-        "hour": "H",
-        "day": "D",
-        "week": "W",
-        "month": "M",
-    }
-    df = df.set_index("time").resample(freq_map[granularity]).mean().reset_index()
-
-    return df
-
-
 def create_pump_tab() -> None:
     if _repository is None:
         raise RuntimeError("Repository not initialized. Call run() first.")
 
     repository = _repository
     with ui.column().classes("w-full items-center"):
+        # Current-status card: latest reading at a glance, independent of
+        # whatever date range is selected in the chart card below.
         with ui.card().classes("w-full max-w-3xl"):
+            ui.label("Current Status").classes("text-lg font-semibold mb-2")
+            with ui.row().classes("w-full justify-around items-start"):
+                status_level = ui.html()
+                status_volume = ui.html()
+            status_updated = ui.label().classes("text-xs text-gray-500 mt-2")
+
+        def refresh_status_card() -> None:
+            latest = repository.get_latest_measurement()
+            if latest.empty:
+                status_level.set_content("")
+                status_volume.set_content("")
+                status_updated.set_text("No measurements yet.")
+                return
+
+            row = latest.iloc[0]
+            level = float(row["level"])
+            volume = float(row["volume"])
+            when: datetime = row["time"].to_pydatetime()
+
+            is_low = level < LOW_LEVEL_WARNING_M
+            level_color = "#b91c1c" if is_low else ACCENT
+            pct_full = 100 * level / TANK_HEIGHT_M if TANK_HEIGHT_M else 0
+            status_level.set_content(
+                _format_current_value_html(
+                    "Level", level, level_color, f"({pct_full:.0f}% full)"
+                )
+            )
+            status_volume.set_content(
+                _format_current_value_html("Volume", volume, ACCENT)
+            )
+
+            # Note: the collector only writes a new row when the level
+            # actually changes, so a long gap here doesn't necessarily mean
+            # the collector is down - it may just mean the level's been
+            # steady. Only the low-level case is flagged as a real warning.
+            status_updated.set_text(
+                f"Last measurement: {when.strftime('%Y-%m-%d %H:%M')} ({_time_ago_str(when)})"
+                + ("  •  LOW WATER LEVEL" if is_low else "")
+            )
+            status_updated.classes(
+                replace="text-xs mt-2 font-semibold text-red-600"
+                if is_low
+                else "text-xs mt-2 text-gray-500"
+            )
+
+        with ui.card().classes("w-full max-w-3xl mt-4"):
             ui.label("Well Water Level Over Time").classes("text-2xl font-bold mb-4")
 
             plot_container = ui.element("div").classes("w-full mt-4")
             stats_container = ui.element("div").classes("w-full mt-4")
 
-            with ui.row().classes("w-full justify-center"):
+            with ui.row().classes("w-full justify-center gap-2"):
                 update_button = ui.button("Update Graph").classes("mt-4")
+                export_button = (
+                    ui.button("Export CSV", icon="download")
+                    .classes("mt-4")
+                    .props("outline")
+                )
+
+            # Quick range presets
+            with ui.row().classes("w-full justify-center gap-2 mt-2"):
+
+                def set_range(range_start: date, range_end: date) -> None:
+                    start_input.set_value(range_start.strftime("%Y-%m-%d"))
+                    end_input.set_value(range_end.strftime("%Y-%m-%d"))
+                    update_graph()
+
+                def set_all_time() -> None:
+                    earliest = repository.get_earliest_measurement()
+                    range_start = (
+                        earliest.iloc[0]["time"].date()
+                        if not earliest.empty
+                        else datetime.now().date()
+                    )
+                    set_range(range_start, datetime.now().date())
+
+                today = datetime.now().date()
+                ui.button(
+                    "Today", on_click=lambda: set_range(today, today)
+                ).props("dense flat size=sm")
+                ui.button(
+                    "7d", on_click=lambda: set_range(today - timedelta(days=7), today)
+                ).props("dense flat size=sm")
+                ui.button(
+                    "30d", on_click=lambda: set_range(today - timedelta(days=30), today)
+                ).props("dense flat size=sm")
+                ui.button(
+                    "90d", on_click=lambda: set_range(today - timedelta(days=90), today)
+                ).props("dense flat size=sm")
+                ui.button("All", on_click=set_all_time).props("dense flat size=sm")
 
             # Date pickers below the graph, centered horizontally
             with ui.row().classes("w-full justify-center gap-8 mt-6 wrap"):
@@ -89,9 +198,9 @@ def create_pump_tab() -> None:
                         ui.label("Global Stats (Selected Date Range)").classes(
                             "text-lg font-semibold"
                         )
-                        global_stats_level = ui.label()
-                        global_stats_volume = ui.label()
-                        global_stats_count = ui.label()
+                        global_stats_level = ui.html()
+                        global_stats_volume = ui.html()
+                        global_stats_count = ui.label().classes("text-xs text-gray-500")
                     with ui.column().classes("items-end"):
                         ui.label("Data Granularity")
                         granularity_input = ui.select(
@@ -101,6 +210,20 @@ def create_pump_tab() -> None:
                         ui.label("Note: 'minute' auto-limited to 7 days").classes(
                             "text-xs text-gray-500 mt-1"
                         )
+
+            def export_csv() -> None:
+                start_date = _convert_ui_date_to_date(start_input.value)
+                end_date = _convert_ui_date_to_date(end_input.value)
+                export_df = repository.get_data_by_date_range(start_date, end_date)
+                if export_df.empty:
+                    ui.notify("No data to export for the selected range.", type="warning")
+                    return
+                csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+                ui.download(
+                    csv_bytes,
+                    filename=f"waterlevel_{start_date}_{end_date}.csv",
+                    media_type="text/csv",
+                )
 
             def update_graph() -> None:
                 # Convert string values from NiceGUI to datetime objects immediately
@@ -140,8 +263,8 @@ def create_pump_tab() -> None:
                         ui.label("No data available for the selected range.").classes(
                             "text-red-500"
                         )
-                    global_stats_level.set_text("")
-                    global_stats_volume.set_text("")
+                    global_stats_level.set_content("")
+                    global_stats_volume.set_content("")
                     global_stats_count.set_text("")
                     return
 
@@ -163,7 +286,7 @@ def create_pump_tab() -> None:
                 df.set_index("time", inplace=True)
                 groups = df.groupby(pd.Grouper(freq=freq_map[granularity]))
 
-                data: list[tuple[datetime, float, str]] = []
+                data: list[tuple[datetime, float, float, str]] = []
                 for time_val, group in groups:
                     if group.empty:
                         continue
@@ -176,30 +299,29 @@ def create_pump_tab() -> None:
                     v_min, v_max = min(v_vals), max(v_vals)
                     l_mean_val = mean(l_vals)
                     v_mean_val = mean(v_vals)
-                    l_std = stdev(l_vals) if len(l_vals) > 1 else 0
-                    v_std = stdev(v_vals) if len(v_vals) > 1 else 0
 
+                    # Headline value (Level) bolded and first so it's the
+                    # first thing the eye lands on; range shown compactly
+                    # instead of separate ± / range lines, and Time/count
+                    # demoted to a single trailing line.
                     tooltip: str = (
-                        f"Time: {time_val.strftime('%Y-%m-%d %H:%M')}<br>"
-                        f"Level: {l_mean_val:.2f} ± {l_std:.2f}<br>"
-                        f"Level Range: [{l_min:.2f}↓, {l_max:.2f}↑]<br>"
-                        f"Volume: {v_mean_val:.2f} ± {v_std:.2f}<br>"
-                        f"Volume Range: [{v_min:.2f}↓, {v_max:.2f}↑]<br>"
-                        f"Number of data points: {n}"
+                        f"<b>Level: {l_mean_val:.2f}</b> ({l_min:.2f}–{l_max:.2f})<br>"
+                        f"Volume: {v_mean_val:.2f} ({v_min:.2f}–{v_max:.2f})<br>"
+                        f"{time_val.strftime('%Y-%m-%d %H:%M')} · n={n}"
                     )
 
-                    data.append((time_val.to_pydatetime(), l_mean_val, tooltip))
+                    data.append((time_val.to_pydatetime(), l_mean_val, v_mean_val, tooltip))
 
                 if not data:
                     plot_container.clear()
                     with plot_container:
                         ui.label("No data after aggregation.").classes("text-red-500")
-                    global_stats_level.set_text("")
-                    global_stats_volume.set_text("")
+                    global_stats_level.set_content("")
+                    global_stats_volume.set_content("")
                     global_stats_count.set_text("")
                     return
 
-                times, levels, tooltips = zip(*data)
+                times, levels, volumes, tooltips = zip(*data)
                 fig.add_trace(
                     go.Scatter(
                         x=times,
@@ -207,17 +329,42 @@ def create_pump_tab() -> None:
                         mode="lines+markers",
                         hoverinfo="text",
                         text=tooltips,
-                        name="Water Level (Aggregated)",
+                        name="Water Level",
+                        line=dict(color=ACCENT),
                     )
+                )
+                # Volume plotted on its own axis for context; the tooltip on
+                # the Level trace above already covers both values, so this
+                # trace skips hover to avoid showing two overlapping tooltips.
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=volumes,
+                        mode="lines",
+                        hoverinfo="skip",
+                        name="Volume",
+                        yaxis="y2",
+                        line=dict(color="#94a3b8", dash="dot"),
+                        opacity=0.7,
+                    )
+                )
+                fig.add_hline(
+                    y=LOW_LEVEL_WARNING_M,
+                    line_dash="dot",
+                    line_color="#dc2626",
+                    annotation_text="Low level warning",
+                    annotation_position="bottom right",
                 )
 
                 fig.update_layout(
                     xaxis_title="Time",
                     yaxis_title="Level",
-                    title="Water Level Over Time",
                     yaxis=dict(range=[0, 3.3]),
+                    yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False),
+                    title="Water Level Over Time",
                     margin=dict(l=20, r=20, t=40, b=20),
                     height=400,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
                 )
 
                 plot_container.clear()
@@ -241,23 +388,32 @@ def create_pump_tab() -> None:
                     l_std: float = stdev(level_vals) if len(level_vals) > 1 else 0
                     v_std: float = stdev(volume_vals) if len(volume_vals) > 1 else 0
 
-                    global_stats_level.set_text(
-                        f"Level: {l_mean_val:.2f} ± {l_std:.2f} \t[{l_min:.2f}↓, {l_max:.2f}↑]"
+                    global_stats_level.set_content(
+                        _format_stat_html("Level", l_mean_val, l_std, l_min, l_max)
                     )
-                    global_stats_volume.set_text(
-                        f"Volume: {v_mean_val:.2f} ± {v_std:.2f} \t[{v_min:.2f}↓, {v_max:.2f}↑]"
+                    global_stats_volume.set_content(
+                        _format_stat_html("Volume", v_mean_val, v_std, v_min, v_max)
                     )
-                    global_stats_count.set_text(f"Number of data points: {n}")
+                    global_stats_count.set_text(f"n = {n} data points")
                 else:
-                    global_stats_level.set_text("No data")
-                    global_stats_volume.set_text("")
+                    global_stats_level.set_content("No data")
+                    global_stats_volume.set_content("")
                     global_stats_count.set_text("")
 
+                refresh_status_card()
+
             update_button.on("click", update_graph)
+            export_button.on("click", export_csv)
             granularity_input.on(
                 "change", update_graph
             )  # Auto-update when granularity changes
             update_graph()
+
+            # Keep the status card and chart fresh without requiring a
+            # manual click - the status card is a cheap single-row query so
+            # it refreshes more often than the full chart.
+            ui.timer(60.0, refresh_status_card, immediate=False)
+            ui.timer(300.0, update_graph, immediate=False)
 
 def create_vvp_tab() -> None:
     if _new_repository is None:
@@ -285,16 +441,54 @@ def create_vvp_tab() -> None:
     color_map = {label: colors[i % len(colors)] for i, label in enumerate(t_data_labels)}
     
     with ui.column().classes("w-full items-center"):
+        # Current-status card: latest reading per sensor/series, independent
+        # of whatever date range is selected below.
         with ui.card().classes("w-full max-w-8xl"):
+            ui.label("Current Status").classes("text-lg font-semibold mb-2")
+            ui.label("Temperatures").classes("text-xs text-gray-500")
+            status_temps = ui.html()
+            ui.label("Power").classes("text-xs text-gray-500 mt-2")
+            status_power = ui.html()
+            status_alarms = ui.html().classes("mt-2")
+
+        def _chips_html(df: pd.DataFrame) -> str:
+            if df.empty:
+                return '<span class="text-gray-500">No data</span>'
+            return " ".join(
+                f'<span class="mr-4"><span class="text-gray-500">{row["name"]}:</span> '
+                f'<b style="color:{ACCENT}">{row["value"]:.1f}</b></span>'
+                for _, row in df.iterrows()
+            )
+
+        def refresh_nibe_status() -> None:
+            status_temps.set_content(_chips_html(repository.get_latest_per_name("temperatures")))
+            status_power.set_content(_chips_html(repository.get_latest_per_name("power")))
+
+            recent_alarms = repository.get_data_by_date_range(
+                "alarms", datetime.now() - timedelta(hours=24), datetime.now()
+            )
+            if recent_alarms.empty:
+                status_alarms.set_content(
+                    '<span class="text-green-700 font-semibold">No alarms in the last 24h</span>'
+                )
+            else:
+                last = recent_alarms.sort_values("timestamp", ascending=False).iloc[0]
+                status_alarms.set_content(
+                    f'<span class="text-red-600 font-semibold">{len(recent_alarms)} alarm(s) in the last 24h</span>'
+                    f' <span class="text-gray-500">(latest: {last["name"]} at '
+                    f'{last["timestamp"].strftime("%Y-%m-%d %H:%M")})</span>'
+                )
+
+        with ui.card().classes("w-full max-w-8xl mt-4"):
             ui.label("Nibe 360P Data").classes("text-2xl font-bold mb-4")
-            
+
             # Compact date range filter with icon and menu
             with ui.row().classes("w-full justify-start items-center gap-2 mb-4"):
                 ui.label("Date Range:").classes("text-sm font-semibold")
-                
+
                 # Display current date range
                 date_display = ui.label(f"{initial_start.strftime('%Y-%m-%d')} to {initial_end.strftime('%Y-%m-%d')}").classes("text-sm")
-                
+
                 # Icon button that opens menu with date picker
                 with ui.button(icon='calendar_month').props('flat dense'):
                     with ui.menu() as date_menu:
@@ -304,13 +498,40 @@ def create_vvp_tab() -> None:
                                 'from': initial_start.strftime("%Y-%m-%d"),
                                 'to': initial_end.strftime("%Y-%m-%d")
                             }).props('range')
-                            
+
                             def apply_dates():
                                 date_menu.close()
                                 reload_all_data()
-                            
+
                             ui.button('Apply', on_click=apply_dates).classes('mt-2')
-            
+
+                def export_csv() -> None:
+                    frames = []
+                    for table_name, frame in (
+                        ("temperatures", t_data),
+                        ("alarms", alarms_data),
+                        ("power", power_data),
+                        ("pump", pump_data),
+                    ):
+                        if not frame.empty:
+                            tagged = frame.copy()
+                            tagged.insert(0, "table", table_name)
+                            frames.append(tagged)
+
+                    if not frames:
+                        ui.notify("No data to export for the selected range.", type="warning")
+                        return
+
+                    combined = pd.concat(frames, ignore_index=True)
+                    csv_bytes = combined.to_csv(index=False).encode("utf-8")
+                    ui.download(
+                        csv_bytes,
+                        filename=f"nibe_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        media_type="text/csv",
+                    )
+
+                ui.button("Export CSV", icon="download", on_click=export_csv).props("outline dense")
+
             temp_checkboxes = {}
             alarms_checkboxes = {}
             power_checkboxes = {}
@@ -349,20 +570,23 @@ def create_vvp_tab() -> None:
             
             def update_temps_plot():
                 import plotly.graph_objs as go
-                
+
                 fig = go.Figure()
-                
+                y_max = None
+
                 # Data is already filtered by date range from repository
                 for label in t_data_labels:
                     if label in temp_checkboxes and temp_checkboxes[label].value:
                         sensor_data = t_data[t_data['name'] == label]
-                        
-                        # Create custom hover text with value on its own row
+                        if sensor_data.empty:
+                            continue
+
+                        # Value bolded so it's the first thing that stands out
                         hover_text = [
-                            f"{label}<br>Time: {row['timestamp']}<br>Value: {row['value']:.2f}"
+                            f"{label}<br><b>Value: {row['value']:.2f}</b><br>Time: {row['timestamp']}"
                             for _, row in sensor_data.iterrows()
                         ]
-                        
+
                         fig.add_trace(go.Scatter(
                             x=sensor_data['timestamp'],
                             y=sensor_data['value'],
@@ -373,7 +597,28 @@ def create_vvp_tab() -> None:
                             hovertext=hover_text,
                             hoverinfo='text'
                         ))
-                
+                        series_max = sensor_data['value'].max()
+                        y_max = series_max if y_max is None else max(y_max, series_max)
+
+                # Overlay alarm events as markers just above the highest
+                # visible series, so you can correlate an alarm with what the
+                # temperatures were doing at that moment.
+                if y_max is not None and not alarms_data.empty:
+                    alarm_y = y_max * 1.05 if y_max > 0 else 1
+                    fig.add_trace(go.Scatter(
+                        x=alarms_data['timestamp'],
+                        y=[alarm_y] * len(alarms_data),
+                        mode='markers',
+                        marker=dict(symbol='triangle-down', color='#dc2626', size=11,
+                                    line=dict(width=1, color='white')),
+                        name='Alarms',
+                        hovertext=[
+                            f"{row['name']}<br>{row['timestamp']}"
+                            for _, row in alarms_data.iterrows()
+                        ],
+                        hoverinfo='text',
+                    ))
+
                 fig.update_layout(
                     xaxis_title="Time",
                     yaxis_title="Value",
@@ -381,7 +626,7 @@ def create_vvp_tab() -> None:
                     height=350,
                     showlegend=True
                 )
-                
+
                 right_panel.clear()
                 with right_panel:
                     ui.plotly(fig).classes("w-full h-full")
@@ -548,7 +793,10 @@ def create_vvp_tab() -> None:
             # Initial plot
             if t_data_labels:
                 update_temps_plot()
-    
+
+    refresh_nibe_status()
+    ui.timer(120.0, refresh_nibe_status, immediate=False)
+
 
 @ui.page("/")
 def index() -> None:

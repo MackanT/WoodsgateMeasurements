@@ -1,6 +1,5 @@
 """Database repository for water measurement data."""
 
-from typing import Tuple
 import psycopg2
 from psycopg2 import sql
 from pathlib import Path
@@ -12,40 +11,45 @@ class SensorDataRepository:
     """Repository class for accessing water measurement data from Postgress database."""
 
     def __init__(self, pwd_path: str | Path) -> None:
-        """Initialize repository with PostgreSQL connection.
+        """Initialize repository, reading and validating the database password.
+
+        A new connection is opened per query (see `_query`) rather than kept
+        open for the lifetime of the repository: this repository is a single
+        module-level instance shared by every web request, and a single
+        shared psycopg2 connection/cursor is not safe to use concurrently -
+        two overlapping requests interleaving execute()/fetchall() calls on
+        the same cursor can corrupt or mix up each other's results.
 
         Args:
             pwd_path: Path to file containing database password
-            
+
         Raises:
             FileNotFoundError: If password file doesn't exist
-            psycopg2.Error: If database connection fails
         """
-        
-        self.conn, self.cursor = self._connect_db(pwd_file_name=str(pwd_path))
-        
+        self._password = self._read_password(str(pwd_path))
+        # Fail fast on startup if the database is unreachable, rather than
+        # only discovering it on the first page load.
+        self._connect().close()
 
-    def _connect_db(
-        self, pwd_file_name: str,
-    ) -> Tuple[psycopg2.extensions.connection, psycopg2.extensions.cursor]:
-        """Connect to PostgreSQL database.
-        
+    @staticmethod
+    def _read_password(pwd_file_name: str) -> str:
+        """Read and validate the database password file.
+
         Args:
             pwd_file_name: Path to file containing database password
-            
+
         Returns:
-            Tuple of (connection, cursor)
-            
+            The stripped password string
+
         Raises:
             FileNotFoundError: If password file doesn't exist
-            psycopg2.OperationalError: If connection to database fails
-            psycopg2.Error: For other database-related errors
+            ValueError: If password file is empty
         """
         pwd_path = Path(pwd_file_name)
-        
+
         if not pwd_path.exists():
             raise FileNotFoundError(f"Password file not found: {pwd_file_name}")
-        
+
         try:
             with open(pwd_file_name, "r") as f:
                 pwd = f.readline()
@@ -53,20 +57,30 @@ class SensorDataRepository:
             raise IOError(f"Failed to read password file: {e}")
 
         pwd = pwd.strip()
-        
+
         if not pwd:
             raise ValueError("Password file is empty")
 
+        return pwd
+
+    def _connect(self) -> psycopg2.extensions.connection:
+        """Open a new PostgreSQL connection.
+
+        Returns:
+            A new connection
+
+        Raises:
+            psycopg2.OperationalError: If connection to database fails
+            psycopg2.Error: For other database-related errors
+        """
         try:
-            conn = psycopg2.connect(
-                host="192.168.1.177", 
-                database="sensor_data", 
-                user="admin", 
-                password=pwd,
+            return psycopg2.connect(
+                host="192.168.1.177",
+                database="sensor_data",
+                user="admin",
+                password=self._password,
                 connect_timeout=10
             )
-            cursor = conn.cursor()
-            return conn, cursor
         except psycopg2.OperationalError as e:
             raise psycopg2.OperationalError(
                 f"Failed to connect to PostgreSQL database at 192.168.1.177: {e}"
@@ -74,42 +88,40 @@ class SensorDataRepository:
         except psycopg2.Error as e:
             raise psycopg2.Error(f"Database error during connection: {e}") from e
 
-    def _cursor_to_df(self, default_columns: list[str] | None = None) -> pd.DataFrame:
-        """Convert cursor results to pandas DataFrame.
-        
+    def _query(
+        self, query, params: tuple, default_columns: list[str] | None = None
+    ) -> pd.DataFrame:
+        """Run a query against a fresh connection and return the results as a DataFrame.
+
         Args:
-            default_columns: Column names to use for empty DataFrame. 
+            query: SQL query (str or psycopg2.sql.Composed)
+            params: Query parameters
+            default_columns: Column names to use for an empty DataFrame.
                            If None, uses cursor.description.
-        
+
         Returns:
             DataFrame with fetched data or empty DataFrame with specified columns
         """
-        rows = self.cursor.fetchall()
-        if rows:
-            columns = [desc[0] for desc in self.cursor.description]
-            df = pd.DataFrame(rows, columns=columns)
-        else:
-            cols = default_columns if default_columns else [
-                desc[0] for desc in self.cursor.description
-            ] if self.cursor.description else []
-            df = pd.DataFrame(columns=cols)
+        # Note: psycopg2 connections only manage the transaction (commit/
+        # rollback) as a context manager - they must still be closed
+        # explicitly, otherwise every query here would leak a connection
+        # just like the ADC file descriptor leak this was written to avoid.
+        conn = self._connect()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                if rows:
+                    columns = [desc[0] for desc in cursor.description]
+                    df = pd.DataFrame(rows, columns=columns)
+                else:
+                    cols = default_columns if default_columns else [
+                        desc[0] for desc in cursor.description
+                    ] if cursor.description else []
+                    df = pd.DataFrame(columns=cols)
+        finally:
+            conn.close()
         return df
-
-    def close(self) -> None:
-        """Close database connection and cursor."""
-        if hasattr(self, 'cursor') and self.cursor:
-            self.cursor.close()
-        if hasattr(self, 'conn') and self.conn:
-            self.conn.close()
-    
-    def __enter__(self):
-        """Context manager entry."""
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - closes connection."""
-        self.close()
-        return False
 
     def get_data_by_date_range(
         self, table_name: str, start_date: datetime | date, end_date: datetime | date
@@ -170,15 +182,14 @@ class SensorDataRepository:
         else:
             end_str = str(end_date)
         
-        self.cursor.execute(
+        df = self._query(
             sql.SQL("select * from {} where timestamp between %s and %s").format(
                 sql.Identifier(table_name)
             ),
             (start_str, end_str),
+            default_columns=["timestamp", "register", "name", "value"],
         )
-        
-        df = self._cursor_to_df(default_columns=["timestamp", "register", "name", "value"])
-        
+
         # Convert timestamp column to datetime
         if not df.empty:
             df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -193,14 +204,14 @@ class SensorDataRepository:
         Returns:
             DataFrame with columns: timestamp, register, name, value
         """
-        self.cursor.execute(
+        df = self._query(
             sql.SQL("SELECT * FROM {} ORDER BY timestamp").format(
                 sql.Identifier(table_name)
-            )
+            ),
+            (),
+            default_columns=["timestamp", "register", "name", "value"],
         )
-        
-        df = self._cursor_to_df(default_columns=["timestamp", "register", "name", "value"])
-        
+
         if not df.empty:
             df["timestamp"] = pd.to_datetime(df["timestamp"])
 
@@ -215,14 +226,41 @@ class SensorDataRepository:
         Returns:
             DataFrame with the latest measurement or empty DataFrame if no data
         """
-        self.cursor.execute(
+        df = self._query(
             sql.SQL("SELECT * FROM {} ORDER BY timestamp DESC LIMIT 1").format(
                 sql.Identifier(table_name)
-            )
+            ),
+            (),
+            default_columns=["timestamp", "register", "name", "value"],
         )
-        
-        df = self._cursor_to_df(default_columns=["timestamp", "register", "name", "value"])
-        
+
+        if not df.empty:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+        return df
+
+    def get_latest_per_name(self, table_name: str) -> pd.DataFrame:
+        """Retrieve the most recent row for each distinct `name` in a table.
+
+        Useful for status cards, since these tables hold multiple named
+        series (e.g. different temperature sensors) and a plain "most recent
+        row overall" would only ever return whichever series happened to
+        report last.
+
+        Args:
+            table_name: Name of the table to query
+
+        Returns:
+            DataFrame with one row per name, or empty DataFrame if no data
+        """
+        df = self._query(
+            sql.SQL("SELECT DISTINCT ON (name) * FROM {} ORDER BY name, timestamp DESC").format(
+                sql.Identifier(table_name)
+            ),
+            (),
+            default_columns=["timestamp", "register", "name", "value"],
+        )
+
         if not df.empty:
             df["timestamp"] = pd.to_datetime(df["timestamp"])
 
@@ -237,11 +275,16 @@ class SensorDataRepository:
         Returns:
             Number of measurement records
         """
-        self.cursor.execute(
-            sql.SQL("SELECT COUNT(*) FROM {}").format(
-                sql.Identifier(table_name)
-            )
-        )
-        count = self.cursor.fetchone()[0]
+        conn = self._connect()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(table_name)
+                    )
+                )
+                count = cursor.fetchone()[0]
+        finally:
+            conn.close()
 
         return count

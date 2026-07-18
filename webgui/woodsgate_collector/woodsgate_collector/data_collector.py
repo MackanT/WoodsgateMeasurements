@@ -21,28 +21,52 @@ ADS1115_REG_CONVERT = 0x00
 # Configuration for continuous conversion, ±4.096V range, 128 SPS
 ADS1115_CONFIG = 0x8483  # Single-shot, A0, ±4.096V, 128SPS
 
+# Persistent I2C bus handle, reused across reads instead of being opened every
+# call. Previously a new smbus2.SMBus(1) was opened on every read and never
+# closed, leaking a file descriptor for /dev/i2c-1 each second until the
+# process hit its open-file limit ("Too many open files"), after which every
+# read failed silently (caught below) and no further data was ever written.
+_bus: smbus2.SMBus | None = None
+
+
+def _get_bus() -> smbus2.SMBus:
+    global _bus
+    if _bus is None:
+        _bus = smbus2.SMBus(1)
+    return _bus
+
+
 def read_adc_voltage():
     """Read voltage from ADS1115 A0 pin"""
+    global _bus
     try:
-        # Initialize I2C bus inside function
-        bus = smbus2.SMBus(1)
+        bus = _get_bus()
         # Write config to start conversion
-        bus.write_i2c_block_data(ADS1115_ADDRESS, ADS1115_REG_CONFIG, 
+        bus.write_i2c_block_data(ADS1115_ADDRESS, ADS1115_REG_CONFIG,
                                 [ADS1115_CONFIG >> 8, ADS1115_CONFIG & 0xFF])
-        
+
         # Wait for conversion (8ms for 128 SPS)
         time.sleep(0.01)
-        
+
         # Read conversion result
         data = bus.read_i2c_block_data(ADS1115_ADDRESS, ADS1115_REG_CONVERT, 2)
-        
+
         # Convert to voltage (16-bit signed, ±4.096V range)
         raw_adc = struct.unpack('>h', bytes(data))[0]
         voltage = raw_adc * 4.096 / 32767.0
-        
+
         return voltage
     except Exception as e:
         print(f"Error reading ADC: {e}")
+        # The bus/connection may be in a bad state (e.g. I2C bus error) -
+        # close and drop it so the next read reopens a fresh handle instead
+        # of retrying forever on a broken one.
+        if _bus is not None:
+            try:
+                _bus.close()
+            except Exception:
+                pass
+            _bus = None
         return None
 
 ##################
@@ -62,28 +86,23 @@ print(" --------------------------------------------")
 
 
 def open_database(file_name:str) -> sqlite3.Connection:
-  
+
   # Ensure directory exists
   os.makedirs(os.path.dirname(file_name), exist_ok=True)
 
-  if os.path.exists(file_name):
-    print(f"Opening file {file_name}")
-    conn = sqlite3.connect(file_name)
-  else:
-    print(f"Cannot find database, initializing file: {file_name}")
-    conn = sqlite3.connect(file_name)
+  db_existed = os.path.exists(file_name)
+  print(f"Opening file {file_name}" if db_existed else f"Cannot find database, initializing file: {file_name}")
 
-    ## Data
-    conn.execute("""
-    create table if not exists data (
-       data_id integer primary key autoincrement
-      ,time datetime
-      ,level float
-      ,volume float
-    )
-    """)
-    print("Created table 'data' successfully!")
-    conn.commit()
+  conn = sqlite3.connect(file_name)
+  conn.execute("""
+  create table if not exists data (
+     data_id integer primary key autoincrement
+    ,time datetime
+    ,level float
+    ,volume float
+  )
+  """)
+  conn.commit()
 
   return conn
 
@@ -112,7 +131,10 @@ def insert_row(conn, level, volume):
     lvl, vol = data
 
     if level != lvl:
-      pre_now = now - timedelta(minutes=int((save_time/120)))
+      # Back-date the "end" of the previous level to one full sampling
+      # window (save_time seconds) ago - the same window used to compute
+      # the median above - instead of an unrelated, hardcoded offset.
+      pre_now = now - timedelta(seconds=save_time)
       pre_date_time = pre_now.strftime('%Y-%m-%d %H:%M:%S')
 
       # "End" previous constant-meas

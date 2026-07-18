@@ -127,6 +127,24 @@ class WaterDataRepository:
 
         return df
 
+    def get_earliest_measurement(self) -> pd.DataFrame:
+        """Retrieve the oldest water measurement.
+
+        Returns:
+            DataFrame with the earliest measurement or empty DataFrame if no data
+        """
+        with sqlite3.connect(self.db_path) as con:
+            df = pd.read_sql_query(
+                "SELECT time, level, volume FROM data ORDER BY time ASC LIMIT 1",
+                con,
+            )
+
+        # Convert time column to datetime
+        if not df.empty:
+            df["time"] = pd.to_datetime(df["time"])
+
+        return df
+
     def get_data_count(self) -> int:
         """Get the total count of measurements in the database.
 
